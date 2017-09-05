@@ -1,7 +1,9 @@
 ## Usage
 
 cp autohotspot /usr/bin
+
 cp autohotspot.service /etc/systemd/system
+
 cp selectable.wlan /etc/wpa_supplicant 
 
 systemctl enable autohotspot.service
@@ -28,3 +30,11 @@ iface wlan0 inet manual
 allow-hotplug wlan0
 ```
 
+## Mount encrypted folder from GIT
+```
+sudo apt-get install ecryptfs-utils
+
+mkdir encrypted_src
+
+sudo mount -f ecryptfs encrypted encrypted_src
+```
