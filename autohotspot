@@ -1,0 +1,138 @@
+#!/bin/bash
+if [ "$EUID" -ne 0 ]
+        then echo "Must be root"
+        exit
+fi
+
+CreateAdHocNetwork()
+{
+	echo "Create AdHoc network"
+	echo "Put interface wlan0 down"
+	ip link set dev wlan0 down
+
+	echo "Set static ip on wlan0..."
+	/sbin/ifconfig wlan0 10.0.50.1 netmask 255.255.255.0 up
+
+	echo "Attempting to start dnsmasq..."
+	systemctl start dnsmasq.service
+
+	echo "Attempting to start hostapd..."
+	systemctl start hostapd.service
+
+	echo "Enable wlan0"
+	ip link set dev wlan0 up
+}
+
+KillHotspot()
+{
+    echo "Shutting Down Hotspot"
+	echo "Attempting to stop hostapd..."
+	systemctl stop hostapd.service
+
+	echo "Attempting to stop dnsmasq..."
+	systemctl stop dnsmasq.service
+
+	echo "Put interface wlan0 down"
+	/sbin/dhclient -r wlan0
+	ip link set dev wlan0 down
+}
+
+ChkWifiUp()
+{
+        sleep 10 #give time for ip to be assigned by router
+        if ! wpa_cli status | grep 'ip_address' >/dev/null 2>&1
+        then #Failed to connect to wifi (check your wifi settings, password etc)
+               echo 'Wifi failed to connect, falling back to Hotspot'
+               wpa_cli terminate >/dev/null 2>&1
+               CreateAdHocNetwork
+        fi
+}
+
+n=1
+SSID=""
+SSIDChk="NoSSid"
+until [[ $SSID ]] || [[ $n -gt 5 ]]
+do
+		echo "Find optimal WiFi connection (try $n / 5)"
+		sleep 5
+		/sbin/wpa_cli scan
+		# only select the SSID's that are actually configured
+		SSID=`/sbin/wpa_cli scan_result | sort -k3 | grep -f /etc/wpa_supplicant/selectable.wlan -o | head -1`
+		
+		if [[ $SSID ]]
+		then
+			SSIDChk=$SSID
+			NetworkID=`/sbin/wpa_cli list_network | grep -w "$SSID" | cut -f1`
+			break
+		else
+			SSIDChk='NoSSid'
+		fi
+		n=$[$n+1]
+done
+
+#Create Hotspot or connect to valid wifi networks
+if [ "$SSIDChk" != "NoSSid" ]
+then
+	echo 'Using SSID:' $SSIDChk
+	if systemctl status hostapd | grep "(running)" >/dev/null 2>&1
+	then #hotspot running and ssid in range
+		KillHotspot
+		echo "Hotspot Deactivated, Bringing Wifi Up"
+
+		echo "Activate wifi connection $SSIDChk[$NetworkID]"
+		/sbin/wpa_cli select_network $NetworkID
+
+		echo "Enable wlan0"
+		ip link set dev wlan0 up
+		/sbin/dhclient wlan0
+
+		_IP=$(hostname -I) || true
+		if [ "$_IP" ]; then
+			printf "My IP address is %s\n" "$_IP"
+		fi
+
+		ChkWifiUp
+	elif { wpa_cli status | grep 'ip_address'; } >/dev/null 2>&1
+	then #Already connected
+		echo "Wifi already connected to network"
+	else #ssid exists and no hotspot running connect to wifi network
+		echo "Connecting to WiFi Network"
+
+		echo "Activate wifi connection $SSIDChk[$NetworkID]"
+		/sbin/wpa_cli select_network $NetworkID
+
+		echo "Enable wlan0"
+		ip link set dev wlan0 up
+		/sbin/dhclient wlan0
+
+		_IP=$(hostname -I) || true
+		if [ "$_IP" ]; then
+			printf "My IP address is %s\n" "$_IP"
+		fi
+		
+		ChkWifiUp
+	fi
+else #ssid or MAC address not in range
+	if systemctl status hostapd | grep "(running)" >/dev/null 2>&1
+	then
+		echo "Hostspot already active"
+	elif { wpa_cli status | grep 'wlan0'; } >/dev/null 2>&1
+	then
+		echo "Cleaning wifi files and Activating Hotspot"
+        NetworkID=`/sbin/wpa_cli list_network | grep "CURRENT" | cut -f1`
+
+        echo "Deactivate wifi connection $NetworkID..."
+        if ! [[ $NetworkID -ge 0 ]]; then
+                echo "Failed to get current SSID. Rebooting..."
+                sleep 5
+                echo "Reboot..."
+                /sbin/reboot
+        fi
+
+        /sbin/wpa_cli disable_network $NetworkID
+		
+		CreateAdHocNetwork
+	else #"No SSID, activating Hotspot"
+		CreateAdHocNetwork
+	fi
+fi
